@@ -82,6 +82,13 @@ class ChatAgent:
             prompt_tokens=response.prompt_tokens,
             completion_tokens=response.completion_tokens,
         )
+
+        # Some smaller models return empty content when tools are present but not needed.
+        # Fall back to a call without tools to get a natural language response.
+        if not response.content and not response.tool_calls and tool_schemas:
+            log.debug("agent.empty_response_with_tools — retrying without tools")
+            response = await self.llm.chat(messages, tools=None)
+
         tools_used: list[str] = []
 
         # 5. Tool execution loop
