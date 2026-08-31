@@ -56,8 +56,13 @@ class ChatAgent:
         log.info("agent.run", session_id=session_id)
         trace = _tracer.trace(name="chat-agent", session_id=session_id, user_input=user_message)
 
-        # 1. Load history
-        history = self.memory.load_history(session_id, self.config.max_history_turns)
+        # 1. Load history — compacts old turns into a summary when session gets long
+        history = await self.memory.load_compacted(
+            session_id,
+            llm=get_llm_client(get_settings().intent_model),
+            recent_turns=self.config.compact_recent_turns,
+            compact_after_turns=self.config.compact_after_turns,
+        )
 
         # 2. Determine which tools to offer the LLM
         active_tools = list(self.config.tools)

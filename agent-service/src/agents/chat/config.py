@@ -21,5 +21,9 @@ class ChatAgentConfig:
     system_prompt: str = _load_prompt("chat_master_prompt.md")
     intent_agent_prompt: str = _load_prompt("intent_agent_prompt.md")
 
-    # Max turns to include in each request (sliding window for long sessions)
+    # Memory: sliding window — max turns sent to LLM per request
     max_history_turns: int = 20
+
+    # Memory: compacting — summarize old turns when session exceeds this threshold
+    compact_after_turns: int = 30   # total turns before compaction fires
+    compact_recent_turns: int = 10  # full turns to keep after the summary
