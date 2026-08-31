@@ -3,6 +3,7 @@ LiteLLM client — calls the OpenAI-compatible /v1/chat/completions endpoint.
 Used in prod mode when the Intel infra stack is running (LiteLLM on port 4000).
 """
 import json
+import re
 import uuid
 
 import httpx
@@ -50,7 +51,13 @@ class LiteLLMClient(LLMClient):
             data = resp.json()
 
         message = data["choices"][0]["message"]
-        content = message.get("content") or None
+        raw_content = message.get("content") or ""
+        # qwen3 thinking tokens: LiteLLM strips the opening <think> but leaves </think>
+        # so take everything after the last </think> if present, else strip full <think>...</think> blocks
+        if "</think>" in raw_content:
+            content = raw_content.split("</think>")[-1].strip() or None
+        else:
+            content = re.sub(r"<think>.*?</think>", "", raw_content, flags=re.DOTALL).strip() or None
         raw_tool_calls = message.get("tool_calls") or []
 
         tool_calls = [

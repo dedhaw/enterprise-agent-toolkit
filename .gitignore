@@ -16,3 +16,6 @@ docker/vault.yml
 # Auto-generated compose files (built from config.cfg + model-configs.yaml at deploy time)
 docker/docker-compose.vllm.yml
 docker/.env
+
+# Node dependencies
+node_modules/

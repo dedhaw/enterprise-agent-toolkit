@@ -8,3 +8,5 @@ model_list:
     litellm_params:
       model: ollama/qwen3:4b
       api_base: http://host.docker.internal:11434
+      extra_body:
+        think: false

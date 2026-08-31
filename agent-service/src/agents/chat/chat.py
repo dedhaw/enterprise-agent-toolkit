@@ -9,6 +9,7 @@ Flow:
   5. Save the turn to memory
   6. Return the final reply
 """
+import json
 import uuid
 from dataclasses import dataclass, field
 
@@ -93,44 +94,50 @@ class ChatAgent:
 
         # 5. Tool execution loop
         if response.tool_calls:
-            messages.append({
-                "role": "assistant",
-                "content": response.content or "",
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {"name": tc.name, "arguments": tc.arguments},
-                    }
-                    for tc in response.tool_calls
-                ],
-            })
+            # Only include tool calls for tools we actually have — ignore hallucinated names
+            known_calls = [tc for tc in response.tool_calls if tc.name in self._tool_map]
+            unknown_calls = [tc.name for tc in response.tool_calls if tc.name not in self._tool_map]
+            if unknown_calls:
+                log.warning("agent.unknown_tools", names=unknown_calls)
 
-            for tc in response.tool_calls:
-                tool = self._tool_map.get(tc.name)
-                if not tool:
-                    log.warning("agent.unknown_tool", name=tc.name)
-                    continue
-
-                result = await tool.execute(**tc.arguments)
-                result.call_id = tc.id
-                tools_used.append(tc.name)
-                log.debug("tool.executed", name=tc.name, success=result.success)
-
+            if known_calls:
                 messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": str(result.data) if result.success else f"Error: {result.error}",
+                    "role": "assistant",
+                    "content": response.content or "",
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            # arguments must be a JSON string when sent back to LiteLLM
+                            "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)},
+                        }
+                        for tc in known_calls
+                    ],
                 })
 
-            # Final LLM call with tool results
-            final_gen = trace.generation(name="llm-call-with-tools", model=self.llm.model, messages=messages)
-            response = await self.llm.chat(messages)
-            final_gen.end(
-                content=response.content,
-                prompt_tokens=response.prompt_tokens,
-                completion_tokens=response.completion_tokens,
-            )
+                for tc in known_calls:
+                    result = await tool.execute(**tc.arguments) if (tool := self._tool_map.get(tc.name)) else None
+                    if result:
+                        tools_used.append(tc.name)
+                        log.debug("tool.executed", name=tc.name, success=result.success)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": str(result.data) if result.success else f"Error: {result.error}",
+                        })
+
+                # Final LLM call with tool results
+                final_gen = trace.generation(name="llm-call-with-tools", model=self.llm.model, messages=messages)
+                response = await self.llm.chat(messages)
+                final_gen.end(
+                    content=response.content,
+                    prompt_tokens=response.prompt_tokens,
+                    completion_tokens=response.completion_tokens,
+                )
+            else:
+                # Model hallucinated unknown tool names — fall back to no-tools call
+                log.warning("agent.all_tools_unknown — falling back to no-tools call")
+                response = await self.llm.chat(messages, tools=None)
 
         final_reply = response.content or ""
 
