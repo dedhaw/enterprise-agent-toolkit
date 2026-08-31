@@ -1,0 +1,10 @@
+# LiteLLM Configuration for Agentic AI Stack
+litellm_settings:
+  success_callback: ["langfuse"]
+  failure_callback: ["langfuse"]
+
+model_list:
+  - model_name: qwen3:4b
+    litellm_params:
+      model: ollama/qwen3:4b
+      api_base: http://host.docker.internal:11434
