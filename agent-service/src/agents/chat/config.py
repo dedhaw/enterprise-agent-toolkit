@@ -15,7 +15,7 @@ class ChatAgentConfig:
 
     # Set to True to enable the intent agent (tool pre-selection via a smaller model)
     # Useful for voice / low-latency use cases. For most cases the main LLM handles this.
-    use_intent_agent: bool = False
+    use_intent_agent: bool = True
 
     # Prompts — loaded from markdown files at import time
     system_prompt: str = _load_prompt("chat_master_prompt.md")

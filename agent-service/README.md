@@ -51,16 +51,23 @@ agent-service/
     │   ├── base.py         # BaseTool ABC — description IS the tool prompt
     │   └── get_time.py     # Example: returns current time
     ├── agents/
-    │   └── chat/           # Chat agent
-    │       ├── config.py   # Tool list, model, intent agent flag, loads prompts
-    │       ├── chat.py     # Agent loop
-    │       ├── intent_agent.py  # Lightweight tool-selection sub-agent
-    │       ├── prompts/    # Markdown prompt files
-    │       └── memory/
-    │           ├── conversation.py  # SQLite-backed session history
-    │           └── vector_store.py  # ChromaDB semantic search / RAG
+    │   ├── chat/                    # Production chat agent
+    │   │   ├── config.py            # Tool list, intent agent flag, loads prompts
+    │   │   ├── chat.py              # Agent loop
+    │   │   ├── intent_agent.py      # Lightweight tool-selection sub-agent
+    │   │   ├── prompts/             # Markdown prompt files
+    │   │   └── memory/
+    │   │       ├── conversation.py  # Session history (Postgres / SQLite)
+    │   │       └── vector_store.py  # ChromaDB semantic search / RAG
+    │   └── scaffolding/             # Template — copy this to build a new agent
+    │       ├── config.py            # Annotated config with all options explained
+    │       ├── agent.py             # Agent loop with memory strategy toggle
+    │       ├── memory.py            # SlidingWindowMemory + CompactingMemory
+    │       └── prompts/
+    │           └── system_prompt.md # Placeholder prompt with writing tips
     ├── routes/
-    │   └── chat_router.py  # POST /message, GET /history/{session_id}
+    │   ├── chat_router.py           # POST /message, GET /history/{session_id}
+    │   └── scaffolding_router.py    # Template router (copy for new agents)
     ├── api/
     │   └── v0/
     │       └── router.py   # Mounts all v0 routes
@@ -76,11 +83,11 @@ agent-service/
 
 | `APP_MODE` | LLM Client | Use Case |
 |---|---|---|
-| `local` | Ollama | Development on your machine |
+| `local` | Ollama direct | Development on your machine |
 | `test` | Azure OpenAI or AWS Bedrock | Integration / staging |
-| `prod` | Azure OpenAI or AWS Bedrock | Production |
+| `prod` | LiteLLM gateway → Ollama / any model | Full Intel infra stack |
 
-Config auto-selects the right LLM client. For `test`/`prod`, set either Azure or AWS credentials — whichever is present wins.
+In `prod` mode, set `LITELLM_API_KEY` to route through the LiteLLM gateway (auth, rate limiting, model routing). If `LITELLM_API_KEY` is not set, it falls back to Azure or AWS credentials.
 
 ---
 
@@ -95,9 +102,13 @@ Config auto-selects the right LLM client. For `test`/`prod`, set either Azure or
 
 ## Adding an Agent
 
-1. Create `src/agents/<agent_name>/` with the same structure as `chat/`
-2. Create `src/routes/<agent_name>_router.py`
-3. Include it in the target API version: `src/api/v0/router.py`
+Use `src/agents/scaffolding/` as your starting point — it's a fully commented template.
+
+1. Copy `src/agents/scaffolding/` → `src/agents/<your_agent>/`
+2. Edit `prompts/system_prompt.md` with your agent's persona and rules
+3. Add tools to `config.py`
+4. Copy `src/routes/scaffolding_router.py` → `src/routes/<your_agent>_router.py` and update the import
+5. Register the router in `src/api/v0/router.py`
 
 ---
 
@@ -112,12 +123,48 @@ Each `src/api/<version>/router.py` is a frozen contract. When a change would bre
 
 ## Intent Agent
 
-The intent agent is a lightweight sub-agent that pre-selects which tools to invoke before the main LLM runs. It trades one extra LLM call for faster main-model inference (fewer tools = smaller context = faster).
+The intent agent is a lightweight sub-agent that pre-selects which tools to invoke before the main LLM runs. It trades one extra LLM call for faster main-model inference (fewer tools = smaller context = faster). It also prevents small models from calling tools unnecessarily on simple messages like greetings.
 
 Enable per agent in `agents/<name>/config.py`:
 ```python
 use_intent_agent: bool = True
 ```
 
-Best for: voice agents, real-time applications, agents with many tools.
-For most chat agents, the main LLM handles tool selection directly.
+Best for: voice agents, real-time applications, agents with many tools, or when using smaller models prone to over-calling tools.
+
+---
+
+## Memory Strategies
+
+Conversation history is stored per `session_id` in Postgres (prod) or SQLite (local). Two strategies are available — see `src/agents/scaffolding/memory.py` for full implementation.
+
+### Sliding Window
+Keeps the last N turns. Older turns fall out of context but remain in the DB.
+
+```python
+# agents/<name>/config.py
+max_history_turns: int = 20  # last 20 user+assistant pairs
+```
+
+- Token cost: fixed
+- Agent forgets things before the window
+- Best for: short tasks, Q&A, support bots
+
+### Compacting
+When total turns exceed a threshold, a small LLM summarizes the old turns. The summary + recent full turns are sent to the main LLM — the agent never loses early context.
+
+```python
+from src.agents.scaffolding.memory import CompactingMemory
+
+summarizer_llm = get_llm_client(get_settings().intent_model)
+self.memory = CompactingMemory(
+    db_session,
+    llm=summarizer_llm,
+    recent_turns=10,        # full turns kept after the summary
+    compact_after_turns=30, # total turns before compaction fires
+)
+```
+
+- Token cost: variable (one extra LLM call when compaction fires)
+- Agent retains gist of the entire conversation
+- Best for: long sessions, onboarding flows, anything needing early context

@@ -2,11 +2,11 @@
 Scaffolding Agent — template agent loop.
 
 This mirrors the structure of src/agents/chat/chat.py.
-The agent loop here is intentionally minimal — no memory, no vector store —
-to show the bare minimum needed to get an agent responding.
 
-To add memory: see src/agents/chat/memory/conversation.py
-To add semantic search: see src/agents/chat/memory/vector_store.py
+Memory strategy is configurable — see the MEMORY STRATEGY section below.
+Two options are shown:
+  - SlidingWindowMemory  (simple, fixed token cost)
+  - CompactingMemory     (uses a small LLM to summarize old turns)
 """
 import json
 from dataclasses import dataclass, field
@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from sqlalchemy.orm import Session
 
 from src.agents.scaffolding.config import ScaffoldingAgentConfig
+from src.agents.scaffolding.memory import CompactingMemory, SlidingWindowMemory
 from src.config import get_llm_client, get_settings
 from src.llm.base import LLMClient
 from src.logger import get_logger
@@ -30,28 +31,51 @@ class ScaffoldingAgentResponse:
 
 class ScaffoldingAgent:
     def __init__(self, db_session: Session) -> None:
-        # db_session is available if you want to add memory later
-        self.db_session = db_session
         self.config = ScaffoldingAgentConfig()
         self.llm: LLMClient = get_llm_client(get_settings().general_model)
         self._tool_map = {t.name: t for t in self.config.tools}
 
+        # ── MEMORY STRATEGY ───────────────────────────────────────────────────
+        # Pick one. Comment out the other.
+        #
+        # Option A: Sliding window — last N turns only, simple and cheap.
+        self.memory = SlidingWindowMemory(db_session, max_turns=20)
+        #
+        # Option B: Compacting — summarizes old turns when session gets long.
+        # Uses a separate LLM call (use a fast/cheap model for the summarizer).
+        # Uncomment to use:
+        #
+        # summarizer_llm = get_llm_client(get_settings().intent_model)
+        # self.memory = CompactingMemory(
+        #     db_session,
+        #     llm=summarizer_llm,
+        #     recent_turns=10,        # keep last 10 turns in full after summary
+        #     compact_after_turns=30, # summarize when total turns exceed this
+        # )
+        # ─────────────────────────────────────────────────────────────────────
+
     async def run(self, session_id: str, user_message: str) -> ScaffoldingAgentResponse:
         log.info("scaffolding_agent.run", session_id=session_id)
 
-        # ── Step A: build the message list ───────────────────────────────────
-        # In a real agent, load history from memory here and prepend it.
-        # See ConversationMemory in src/agents/chat/memory/conversation.py
+        # ── Step A: load history ──────────────────────────────────────────────
+        # SlidingWindowMemory.load() is sync. CompactingMemory.load() is async
+        # because it may call the LLM to summarize. Handle both:
+        if isinstance(self.memory, CompactingMemory):
+            history = await self.memory.load(session_id)
+        else:
+            history = self.memory.load(session_id)
+
+        # ── Step B: build messages ────────────────────────────────────────────
         messages = [
             {"role": "system", "content": self.config.system_prompt},
-            # history would go here
+            *history,
             {"role": "user", "content": user_message},
         ]
 
-        # ── Step B: prepare tool schemas ──────────────────────────────────────
+        # ── Step C: prepare tool schemas ──────────────────────────────────────
         tool_schemas = [t.to_openai_schema() for t in self.config.tools] or None
 
-        # ── Step C: first LLM call ────────────────────────────────────────────
+        # ── Step D: first LLM call ────────────────────────────────────────────
         response = await self.llm.chat(messages, tools=tool_schemas)
 
         # Handle models that return empty content when tools are present but not needed
@@ -60,7 +84,7 @@ class ScaffoldingAgent:
 
         tools_used: list[str] = []
 
-        # ── Step D: tool execution loop ───────────────────────────────────────
+        # ── Step E: tool execution loop ───────────────────────────────────────
         if response.tool_calls:
             known_calls = [tc for tc in response.tool_calls if tc.name in self._tool_map]
             unknown_calls = [tc.name for tc in response.tool_calls if tc.name not in self._tool_map]
@@ -93,17 +117,17 @@ class ScaffoldingAgent:
                             "content": str(result.data) if result.success else f"Error: {result.error}",
                         })
 
-                # Final LLM call with tool results
                 response = await self.llm.chat(messages)
             else:
                 response = await self.llm.chat(messages, tools=None)
 
-        # ── Step E: save to memory ────────────────────────────────────────────
-        # Add memory persistence here when ready. Example:
-        #   self.memory.save_turn(session_id, user_message, response.content or "")
+        final_reply = response.content or ""
+
+        # ── Step F: save turn ─────────────────────────────────────────────────
+        self.memory.save(session_id, user_message, final_reply)
 
         return ScaffoldingAgentResponse(
-            reply=response.content or "",
+            reply=final_reply,
             session_id=session_id,
             tools_used=tools_used,
         )
