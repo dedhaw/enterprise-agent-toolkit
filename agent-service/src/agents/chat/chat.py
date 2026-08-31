@@ -22,8 +22,10 @@ from src.config import get_llm_client, get_settings
 from src.llm.base import LLMClient
 from src.logger import get_logger
 from src.tools.base import BaseTool
+from src.tracing import Tracer
 
 log = get_logger(__name__)
+_tracer = Tracer()
 
 
 @dataclass
@@ -51,6 +53,7 @@ class ChatAgent:
 
     async def run(self, session_id: str, user_message: str) -> AgentResponse:
         log.info("agent.run", session_id=session_id)
+        trace = _tracer.trace(name="chat-agent", session_id=session_id, user_input=user_message)
 
         # 1. Load history
         history = self.memory.load_history(session_id, self.config.max_history_turns)
@@ -72,7 +75,13 @@ class ChatAgent:
         )
 
         # 4. First LLM call
+        generation = trace.generation(name="llm-call", model=self.llm.model, messages=messages)
         response = await self.llm.chat(messages, tools=tool_schemas)
+        generation.end(
+            content=response.content,
+            prompt_tokens=response.prompt_tokens,
+            completion_tokens=response.completion_tokens,
+        )
         tools_used: list[str] = []
 
         # 5. Tool execution loop
@@ -108,7 +117,13 @@ class ChatAgent:
                 })
 
             # Final LLM call with tool results
+            final_gen = trace.generation(name="llm-call-with-tools", model=self.llm.model, messages=messages)
             response = await self.llm.chat(messages)
+            final_gen.end(
+                content=response.content,
+                prompt_tokens=response.prompt_tokens,
+                completion_tokens=response.completion_tokens,
+            )
 
         final_reply = response.content or ""
 
@@ -116,5 +131,8 @@ class ChatAgent:
         self.memory.save_turn(session_id, user_message, final_reply)
         turn_id = str(uuid.uuid4())
         self.vector_store.add(session_id, turn_id, f"User: {user_message}\nAssistant: {final_reply}")
+
+        trace.update(output=final_reply, tools_used=tools_used)
+        _tracer.flush()
 
         return AgentResponse(reply=final_reply, tools_used=tools_used, session_id=session_id)

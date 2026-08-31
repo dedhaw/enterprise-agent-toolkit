@@ -1,5 +1,6 @@
 """
-SQLAlchemy SQLite setup.
+SQLAlchemy engine setup.
+Uses Postgres when DATABASE_URL is configured (prod), SQLite otherwise (local).
 All ORM models import Base from here.
 """
 import os
@@ -18,12 +19,14 @@ class Base(DeclarativeBase):
 
 def _get_engine():
     settings = get_settings()
-    os.makedirs(os.path.dirname(settings.db_path), exist_ok=True)
-    return create_engine(
-        f"sqlite:///{settings.db_path}",
-        connect_args={"check_same_thread": False},
-        echo=False,
-    )
+    url = settings.resolved_database_url
+
+    if url.startswith("sqlite"):
+        os.makedirs(os.path.dirname(settings.db_path), exist_ok=True)
+        return create_engine(url, connect_args={"check_same_thread": False}, echo=False)
+
+    # Postgres (or any other DB) — no extra connect_args needed
+    return create_engine(url, echo=False)
 
 
 def init_db() -> None:

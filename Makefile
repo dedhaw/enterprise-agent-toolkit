@@ -9,13 +9,14 @@ MODEL := qwen3:4b
 
 .PHONY: run stop logs frontend
 
-## Start everything: Ollama model, Docker stack, and frontend dev server
-run: ollama-ready docker-up litellm-ready frontend-install
+## Start everything: Ollama model, Docker stack, agent-service, and frontend dev server
+run: ollama-ready docker-up litellm-ready agent-service-install agent-service-up frontend-install
 	@echo ""
 	@echo "✔  Stack is up. Starting frontend..."
-	@echo "   Chat UI  → http://localhost:5173"
-	@echo "   LiteLLM  → http://localhost:4000"
-	@echo "   Langfuse → http://localhost:3002"
+	@echo "   Chat UI      → http://localhost:5173"
+	@echo "   Agent API    → http://localhost:8000/docs"
+	@echo "   LiteLLM      → http://localhost:4000"
+	@echo "   Langfuse     → http://localhost:3002"
 	@echo ""
 	cd $(FRONTEND_DIR) && npm run dev
 
@@ -50,6 +51,25 @@ litellm-ready:
 	@$(COMPOSE) restart litellm
 	@sleep 4
 
+## Install agent-service Python deps (skipped if venv exists)
+agent-service-install:
+	@if [ ! -d "$(AGENT_SERVICE_DIR)/.venv" ]; then \
+		echo "→ Installing agent-service dependencies..."; \
+		cd $(AGENT_SERVICE_DIR) && make install; \
+	fi
+
+## Start agent-service in background (idempotent)
+agent-service-up:
+	@if ! curl -sf http://localhost:8000/health > /dev/null 2>&1; then \
+		echo "→ Starting agent-service..."; \
+		cd $(AGENT_SERVICE_DIR) && mkdir -p data && \
+		.venv/bin/uvicorn src.app:app --host 0.0.0.0 --port 8000 &>/tmp/agent-service.log & \
+		sleep 3; \
+		echo "  Agent service up."; \
+	else \
+		echo "→ Agent service already running."; \
+	fi
+
 ## Install frontend npm deps (skipped if node_modules exists)
 frontend-install:
 	@if [ ! -d "$(FRONTEND_DIR)/node_modules" ]; then \
@@ -57,8 +77,10 @@ frontend-install:
 		cd $(FRONTEND_DIR) && npm install; \
 	fi
 
-## Stop all Docker services and remove volumes
+## Stop all Docker services, agent-service, and Ollama
 stop:
+	@echo "→ Stopping agent-service..."
+	@pkill -f "uvicorn src.app:app" 2>/dev/null || true
 	@echo "→ Stopping Docker services..."
 	@$(INFRA_DIR)/deploy-agentic-stack.sh --platform=docker --down
 	@echo "→ Stopping Ollama..."

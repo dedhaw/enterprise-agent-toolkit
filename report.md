@@ -52,10 +52,120 @@ This repo takes the Intel platform and adds what it was always missing: the actu
 
 ```
 agent-infra/          ← Intel's original toolkit (unchanged)
-agent-service/  ← FastAPI agent service built on top of it
-frontend/       ← React chatbot UI for testing
+agent-service/        ← FastAPI agent service built on top of it
+frontend/             ← React chatbot UI for testing
 ```
 
 `agent-service` is designed to run standalone locally (talking directly to Ollama) and to slot into the full infra platform in production — using LiteLLM as its gateway, Postgres/Redis as its data layer, and Langfuse for tracing.
 
 The infra is the stage. `agent-service` is what performs on it.
+
+---
+
+## The infra in detail — what's running and why
+
+When you run `make run`, Docker starts the following services. Here is what each one does and why you'd care.
+
+### LiteLLM — `http://localhost:4000`
+
+> **Proxy and routing layer. Every service talks to one endpoint — swap the model in one config file and nothing else changes. Gives you per-key auth, rate limits, and budget controls across every agent and service sharing the same LLM.**
+
+**What it is:** An OpenAI-compatible reverse proxy that sits in front of your actual LLM.
+
+**What it does:** Instead of your agent calling Ollama or any cloud model directly, every LLM request goes through LiteLLM first. It handles:
+- **Auth** — virtual API keys so different services can have different access levels
+- **Rate limiting** — prevent any one service from monopolizing the model
+- **Model routing** — swap the underlying model (Ollama → Azure → AWS) without changing any agent code
+- **Usage logging** — every call is logged to Postgres and forwarded to Langfuse
+
+**Login / UI:** LiteLLM has no web UI in open-source mode. You manage it via its REST API or by editing `agent-infra/docker/litellm/config.yaml`. The master key is `sk-6a6f751b5716bff7a396` (from `agent-infra/docker/.env`).
+
+**Why use it vs calling Ollama directly:** In production you may run multiple agents, multiple services, or multiple team members all hitting the same LLM. LiteLLM is the single controlled entrypoint — you can rotate keys, swap models, set budgets, and see all traffic in one place without touching agent code.
+
+---
+
+### PostgreSQL + pgvector — `localhost:5432`
+
+**What it is:** A single shared Postgres instance with the `pgvector` extension enabled for vector similarity search.
+
+**What it does:** Hosts four separate databases:
+| Database | Owner | Used for |
+|---|---|---|
+| `litellm` | `litellm` user | LiteLLM stores API keys, usage records, model configs |
+| `flowisedb` | `flowise` user | Flowise stores agent workflows, credentials, chat logs |
+| `langfuse` | `langfuse` user | Langfuse stores traces, scores, prompts |
+| `agentdb` | `agentuser` | Your agent-service — conversation history, vector embeddings |
+
+**No login UI** — connect with any Postgres client (e.g. TablePlus, psql) using the credentials from `agent-infra/docker/.env`. The `agentdb` user/password is `agentuser` / `wLsx5AxhuBxdbXKRQv4L`.
+
+**Why use it vs SQLite:** SQLite is a single-file DB local to the process — fine for dev on one machine. Postgres is networked, shared, and durable. In production: multiple agent-service instances can share the same conversation history, you can run analytics queries across sessions, and pgvector lets you do semantic search at scale without a separate vector DB.
+
+---
+
+### Redis Stack — `localhost:6379`
+
+> **Caching and queueing. Caches LLM responses so repeated prompts don't hit the model again. Also the job queue for Flowise async steps and the event buffer for Langfuse traces.**
+
+**What it is:** Redis with the RediSearch module (for vector search) and RedisJSON.
+
+**What it does:** Shared by LiteLLM (caching LLM responses to cut costs/latency), Flowise (job queue for async agent steps), and Langfuse (event buffering). Each service has its own ACL user with separate passwords.
+
+**No login UI** — use `redis-cli` or RedisInsight. Admin password is in `agent-infra/docker/.env` as `REDIS_PASSWORD`.
+
+**Why use it vs nothing:** Without Redis, every identical LLM prompt hits the model again. With Redis caching in LiteLLM, repeated prompts are served from cache in milliseconds. Also enables async/queue patterns for long-running agent tasks.
+
+---
+
+### Langfuse — `http://localhost:3002`
+
+> **Observability, not just logs. Shows you the exact prompt that went in, the exact completion that came out, which tools were called, token counts, latency per step, and cost. Logs tell you something happened — Langfuse shows you what happened inside the LLM.**
+
+**What it is:** An open-source LLM observability platform. Think Datadog but for AI agents.
+
+**What it does:** Every LLM call your agent makes gets recorded as a "trace" in Langfuse — the full input messages, the model response, tool calls, token counts, latency, and cost. You can see exactly what your agent said to the LLM, what the LLM replied, which tools it called, and how long each step took.
+
+**Login:** Go to `http://localhost:3002` and sign in with:
+- Email: `admin@admin.com`
+- Password: `ckwYUI73SJTJU4wBEg8c` (from `agent-infra/docker/.env` → `LANGFUSE_INIT_USER_PASSWORD`)
+
+The project is pre-seeded as **"AI Inference"** under the **"Agentic AI Stack"** org.
+
+**What you see after logging in:**
+- **Traces** — one trace per agent run, showing the full message flow
+- **Generations** — each individual LLM call within a trace (first call, tool-result call, etc.)
+- **Sessions** — groups all traces from one `session_id` together so you can see a full conversation
+- **Dashboard** — token usage, latency, cost over time
+
+**Why use it vs just reading logs:** Structured logs tell you something happened. Langfuse tells you *what* happened inside the LLM — the exact prompt, the exact completion, which tool was chosen and why. It's how you debug why your agent said something wrong, catch prompt regressions, and track cost.
+
+---
+
+### Flowise — `http://localhost:3000` (disabled by default)
+
+> **No-code agent builder. Prototypes and workflows that don't need custom Python live here. Anything needing real tool integration, memory control, or custom business logic belongs in `agent-service`. Both share the same LiteLLM backend and both show up in Langfuse.**
+
+**What it is:** A drag-and-drop visual builder for AI workflows — no code required.
+
+**What it does:** Lets non-engineers build and test agent chains using a GUI. Connects to LiteLLM as its LLM backend and Postgres as its storage. Useful for rapid prototyping of new agent flows before they get built properly in `agent-service`.
+
+**Note:** Flowise is in the `flowise` Docker Compose profile and does not start by default. To start it: `docker compose --profile flowise up -d flowise` from `agent-infra/docker/`. On first run you must create an owner account at `http://localhost:3000` before it accepts any traffic (security measure).
+
+**Why use it:** Good for showing non-technical stakeholders what the agent does, or for prototyping a new workflow before writing Python.
+
+---
+
+## agent-infra vs agent-service standalone — when to use which
+
+> **Use standalone (`APP_MODE=local`) when you're writing code and want fast iteration — just Ollama, no Docker needed. Switch to prod (`APP_MODE=prod`) when you want to see what the agent is actually doing, share it with a team, or validate production behavior.**
+
+| | `APP_MODE=local` (standalone) | `APP_MODE=prod` (with agent-infra) |
+|---|---|---|
+| **LLM backend** | Ollama direct | LiteLLM → Ollama (or any model) |
+| **Database** | SQLite file on disk | Postgres (shared, persistent, queryable) |
+| **Vector store** | ChromaDB local files | ChromaDB local files (same for now) |
+| **Observability** | Structured logs to stdout | Full Langfuse traces in the UI |
+| **Auth / rate limiting** | None | LiteLLM keys and budgets |
+| **When to use** | Dev on your laptop, quick iteration | Testing production behavior, team shared instance, debugging with traces |
+| **Requirements** | Just Ollama | Docker + `make run` |
+
+**The short version:** Use standalone when you're writing code and want fast iteration. Switch to prod mode when you want to see what the agent is actually doing, share it with a team, or validate production behavior.

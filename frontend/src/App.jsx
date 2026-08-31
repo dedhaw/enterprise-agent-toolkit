@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 
-const API_KEY = 'sk-6a6f751b5716bff7a396'
-const MODEL = 'qwen3:4b'
+const SESSION_ID = `session-${Math.random().toString(36).slice(2, 9)}`
 
 export default function App() {
   const [messages, setMessages] = useState([
@@ -20,23 +19,15 @@ export default function App() {
     const text = input.trim()
     if (!text || loading) return
 
-    const newMessages = [...messages, { role: 'user', content: text }]
-    setMessages(newMessages)
+    setMessages(prev => [...prev, { role: 'user', content: text }])
     setInput('')
     setLoading(true)
 
     try {
-      const res = await fetch('/api/v1/chat/completions', {
+      const res = await fetch('/api/v0/agents/chat/message', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: MODEL,
-          messages: newMessages.map(({ role, content }) => ({ role, content })),
-          stream: false,
-        }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: SESSION_ID, message: text }),
       })
 
       if (!res.ok) {
@@ -45,8 +36,7 @@ export default function App() {
       }
 
       const data = await res.json()
-      const content = data.choices?.[0]?.message?.content || ''
-      setMessages(prev => [...prev, { role: 'assistant', content }])
+      setMessages(prev => [...prev, { role: 'assistant', content: data.reply }])
     } catch (err) {
       setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${err.message}` }])
     } finally {
@@ -59,7 +49,6 @@ export default function App() {
       <header>
         <span className="dot" />
         Agent Chatbot
-        <span className="model-tag">{MODEL}</span>
       </header>
 
       <div className="messages">
