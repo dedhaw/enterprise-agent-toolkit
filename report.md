@@ -169,3 +169,17 @@ The project is pre-seeded as **"AI Inference"** under the **"Agentic AI Stack"**
 | **Requirements** | Just Ollama | Docker + `make run` |
 
 **The short version:** Use standalone when you're writing code and want fast iteration. Switch to prod mode when you want to see what the agent is actually doing, share it with a team, or validate production behavior.
+
+---
+
+## Downsides
+
+The toolkit solves infrastructure deployment well, but there are real gaps to weigh before adopting it.
+
+- **No evaluation pipeline.** There's no way to measure agent output quality, catch regressions, or benchmark model/prompt changes over time. Langfuse gives you observability into what happened, but nothing here tells you whether the agent's answers are actually *good*.
+- **No automated tests or CI.** There's no test suite for `agent-service` or the infra layer, and no CI workflow. Correctness depends entirely on manual verification.
+- **Secrets are stored — and documented — in plaintext.** `agent-infra/docker/.env` holds the LiteLLM master key and Postgres/Redis/Flowise/Langfuse/ClickHouse/MinIO passwords in cleartext, with no vault or secrets-manager integration. Several of those values are reproduced directly in this report (LiteLLM master key, `agentdb` password, Langfuse admin credentials). `SECURITY.md` is boilerplate pointing to Intel's vulnerability-reporting page and doesn't address this pattern.
+- **High operational overhead relative to the actual "intelligence" delivered.** Running this stack means deploying and monitoring 9+ services (LiteLLM, vLLM/SGLang, Redis, Postgres, Flowise, Langfuse, Agent Sandbox, KubeRay, Prometheus/Grafana/Loki), while the actual agent reasoning lives entirely outside the infra layer — `core/` and `plugins/` are pure Ansible/shell deployment automation, not agent logic.
+- **Not cloud-native by default.** The Kubernetes path targets bare-metal Intel Xeon via Kubespray, not EKS/AKS/GKE. Teams on managed cloud Kubernetes need to adapt or replace the provided deployment tooling themselves.
+- **Inconsistent vector-store story.** Postgres+pgvector is provisioned specifically for long-term memory and RAG, but per the toolkit's own local-vs-prod comparison above, `agent-service` uses local ChromaDB files in *both* modes — leaving pgvector's actual role unclear.
+- **Operational friction in a couple of components.** LiteLLM has no admin UI — key and model management is REST API or YAML-file only. Flowise is disabled by default and requires manually enabling its Docker Compose profile plus a first-run owner-account setup before it accepts traffic.
